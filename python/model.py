@@ -41,12 +41,17 @@ class SASRec(torch.nn.Module):
         self.dev = args.device
         self.norm_first = args.norm_first
 
+        self.time_num = args.time_range
+        self.time_scale = args.time_scale
+        self.time_func = args.time_func
+
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
         # https://stackoverflow.com/questions/42704283/adding-l1-l2-regularization-in-pytorch
         
         # 嵌入层：物品嵌入和位置嵌入（离散ID -> 连续的向量表示）
         self.item_emb = torch.nn.Embedding(self.item_num+1, args.hidden_units, padding_idx=0)
         self.pos_emb = torch.nn.Embedding(args.maxlen+1, args.hidden_units, padding_idx=0)
+        self.time_emb = torch.nn.Embedding(self.time_num+1, args.hidden_units, padding_idx=0)
         self.emb_dropout = torch.nn.Dropout(p=args.dropout_rate)
 
         # 多层Transformer结构
@@ -81,13 +86,14 @@ class SASRec(torch.nn.Module):
             # self.pos_sigmoid = torch.nn.Sigmoid()
             # self.neg_sigmoid = torch.nn.Sigmoid()
 
-    def log2feats(self, log_seqs): # TODO: fp64 and int64 as default in python, trim?
+    def log2feats(self, log_seqs, time_seqs): # TODO: fp64 and int64 as default in python, trim?
         """
         将用户行为序列转换为 结果特征表示
         """
+
         # 物品嵌入
         seqs = self.item_emb(torch.LongTensor(log_seqs).to(self.dev))
-        seqs *= self.item_emb.embedding_dim ** 0.5 #缩放嵌入向量
+        seqs *= self.item_emb.embedding_dim ** 0.5 # /√d 缩放嵌入向量
 
         # 位置嵌入
         # 创建位置索引矩阵
@@ -95,7 +101,19 @@ class SASRec(torch.nn.Module):
         # TODO: directly do tensor = torch.arange(1, xxx, device='cuda') to save extra overheads
         poss *= (log_seqs != 0)  # 掩码，非0位置才添加位置信息
         seqs += self.pos_emb(torch.LongTensor(poss).to(self.dev))
-        seqs = self.emb_dropout(seqs)
+
+        # 时间嵌入
+        if self.time_func == 'log':
+            times = self.time_scale * np.log(time_seqs + 1)
+        else:
+            times = self.time_num * (1 - np.exp(-time_seqs * self.time_scale))
+
+        times = times.astype(np.int64)
+        times = np.clip(times, 1, self.time_num)
+        times *= (log_seqs != 0)
+        seqs += self.time_emb(torch.LongTensor(times).to(self.dev))
+
+        seqs = self.emb_dropout(seqs) # dropout
 
         # 创建因果掩码，确保只能看到当前位置及之前的序列
         tl = seqs.shape[1] # time dim len for enforce causality
@@ -124,12 +142,15 @@ class SASRec(torch.nn.Module):
 
         return log_feats
 
-    def forward(self, user_ids, log_seqs, pos_seqs, neg_seqs): # for training        
+    def forward(self, user_ids, log_seqs, time_seqs, pos_seqs, neg_seqs): # for training        
         """
         前向传播，用于训练
         """
+        # log_seqs = seq[0]
+        # time_seqs = seq[1]
+
         # 获取序列特征表示
-        log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
+        log_feats = self.log2feats(log_seqs, time_seqs) # user_ids hasn't been used yet
 
         # 获取正样本、负样本的嵌入
         pos_embs = self.item_emb(torch.LongTensor(pos_seqs).to(self.dev))
@@ -144,11 +165,14 @@ class SASRec(torch.nn.Module):
 
         return pos_logits, neg_logits # pos_pred, neg_pred
 
-    def predict(self, user_ids, log_seqs, item_indices): # for inference
+    def predict(self, user_ids, log_seqs, time_seqs, item_indices): # for inference
         """
         预测函数，用于推理？
         """
-        log_feats = self.log2feats(log_seqs) # user_ids hasn't been used yet
+        # log_seqs = seq[0]
+        # time_seqs = seq[1]
+
+        log_feats = self.log2feats(log_seqs, time_seqs) # user_ids hasn't been used yet
 
         # 只使用序列的最后一个位置的特征
         final_feat = log_feats[:, -1, :] # only use last QKV classifier, a waste

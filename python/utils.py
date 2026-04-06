@@ -46,23 +46,33 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         # uid = np.random.randint(1, usernum + 1)
         while len(user_train[uid]) <= 1: uid = np.random.randint(1, usernum + 1)
 
-        seq = np.zeros([maxlen], dtype=np.int32)  # 输入序列
+        item_seq = np.zeros([maxlen], dtype=np.int32)  # 输入序列的物品
+        time_seq = np.zeros([maxlen], dtype=np.int32)  # 输入序列的时间戳
         pos = np.zeros([maxlen], dtype=np.int32)  # 正样本（下一个要预测的物品）
         neg = np.zeros([maxlen], dtype=np.int32)  # 负样本（随机采样的未交互物品）
 
-        nxt = user_train[uid][-1]
+        nxt = user_train[uid][-1][0]
         idx = maxlen - 1
 
-        ts = set(user_train[uid])
-        for i in reversed(user_train[uid][:-1]):
-            seq[idx] = i
+        ts = set([x[0] for x in user_train[uid]])
+        train_seq = user_train[uid][:-1]  
+
+        #for i, t in reversed(user_train[uid][:-1]):
+        for k in range(len(train_seq) - 1, -1, -1):
+            i, t = train_seq[k]
+            # 计算与上一次交互的时间间隔。如果是第一个交互，间隔记为 0
+            t_prev = train_seq[k - 1][1] if k > 0 else t
+            interval = max(0, t - t_prev) 
+
+            item_seq[idx] = i
+            time_seq[idx] = interval
             pos[idx] = nxt
             neg[idx] = random_neq(1, itemnum + 1, ts)          # Don't need "if nxt != 0"
             nxt = i
             idx -= 1
             if idx == -1: break
 
-        return (uid, seq, pos, neg)
+        return (uid, [item_seq, time_seq], pos, neg)
 
     np.random.seed(SEED)
     uids = np.arange(1, usernum+1, dtype=np.int32)
@@ -120,12 +130,13 @@ def data_partition(fname):
     # assume user/item index starting from 1
     f = open('data/%s.txt' % fname, 'r')
     for line in f:
-        u, i = line.rstrip().split(' ')
+        u, i, t = line.rstrip().split(' ')
         u = int(u)
         i = int(i)
+        t = int(float(t)) # 时间戳
         usernum = max(u, usernum)
         itemnum = max(i, itemnum)
-        User[u].append(i)
+        User[u].append((i,t))
 
     # 分割数据：最后两个交互分别作为验证和测试
     for user in User:
@@ -140,6 +151,7 @@ def data_partition(fname):
             user_valid[user].append(User[user][-2])
             user_test[user] = []
             user_test[user].append(User[user][-1])
+            
     return [user_train, user_valid, user_test, usernum, itemnum]
 
 # TODO: merge evaluate functions for test and val set
@@ -165,25 +177,37 @@ def evaluate(model, dataset, args):
         if len(train[u]) < 1 or len(test[u]) < 1: continue
 
         # 构建测试的输入序列（加上验证集物品）
-        seq = np.zeros([args.maxlen], dtype=np.int32)
+        item_seq = np.zeros([args.maxlen], dtype=np.int32)
+        time_seq = np.zeros([args.maxlen], dtype=np.int32)
+
         idx = args.maxlen - 1
-        seq[idx] = valid[u][0]
+
+        full_seq = train[u] + [valid[u][0]]
+
+        # item_seq[idx] = valid[u][0][0]
+        # time_seq[idx] = valid[u][0][1]
         idx -= 1
-        for i in reversed(train[u]):
-            seq[idx] = i
+        # for i, t in reversed(train[u]):
+        for k in range(len(full_seq) - 1, -1, -1):
+            i, t = full_seq[k]
+            t_prev = full_seq[k - 1][1] if k > 0 else t
+            interval = max(1, t - t_prev) #防止log出错
+
+            item_seq[idx] = i
+            time_seq[idx] = interval
             idx -= 1
             if idx == -1: break
 
         # 构造1+100候选物品列表
-        rated = set(train[u])
+        rated = set([x[0] for x in train[u]])
         rated.add(0)
-        item_idx = [test[u][0]]
+        item_idx = [test[u][0][0]]
         for _ in range(100):
             t = np.random.randint(1, itemnum + 1)
             while t in rated: t = np.random.randint(1, itemnum + 1)
             item_idx.append(t)
 
-        predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
+        predictions = -model.predict(*[np.array(l) for l in [[u], [item_seq], [time_seq], item_idx]])
         predictions = predictions[0] # - for 1st argsort DESC
 
         # 计算排名
@@ -219,23 +243,33 @@ def evaluate_valid(model, dataset, args):
         if len(train[u]) < 1 or len(valid[u]) < 1: continue
 
         # 构建输入序列（只包含训练集物品）
-        seq = np.zeros([args.maxlen], dtype=np.int32)
+        item_seq = np.zeros([args.maxlen], dtype=np.int32)
+        time_seq = np.zeros([args.maxlen], dtype=np.int32)
         idx = args.maxlen - 1
-        for i in reversed(train[u]):
-            seq[idx] = i
+
+        full_seq = train[u]
+        
+        # for i, t in reversed(train[u]):
+        for k in range(len(full_seq) - 1, -1, -1):
+            i, t = full_seq[k]
+            t_prev = full_seq[k - 1][1] if k > 0 else t
+            interval = max(0, t - t_prev)
+        
+            item_seq[idx] = i
+            time_seq[idx] = interval
             idx -= 1
             if idx == -1: break
 
         # 候选物品列表1+100
-        rated = set(train[u])
+        rated = set([x[0] for x in train[u]])
         rated.add(0)
-        item_idx = [valid[u][0]]
+        item_idx = [valid[u][0][0]]
         for _ in range(100):
             t = np.random.randint(1, itemnum + 1)
             while t in rated: t = np.random.randint(1, itemnum + 1)
             item_idx.append(t)
 
-        predictions = -model.predict(*[np.array(l) for l in [[u], [seq], item_idx]])
+        predictions = -model.predict(*[np.array(l) for l in [[u], [item_seq], [time_seq], item_idx]])
         predictions = predictions[0]
 
         rank = predictions.argsort().argsort()[0].item()
