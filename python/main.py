@@ -145,7 +145,8 @@ if __name__ == '__main__':
             # L2正则化防过拟合
             # torch.norm(param) returns the square root of the sum of squared weights (‖w‖₂), 
             # should be torch.norm(param)**2 or the way below which is faster.
-            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)    
+            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2) 
+            for param in model.time_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)   
             
             # 反向传播
             loss.backward()
@@ -168,7 +169,7 @@ if __name__ == '__main__':
                     % (epoch, T, t_valid[0], t_valid[1], t_test[0], t_test[1]))
 
             # 保存最佳
-            if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr or t_test[0] > best_test_ndcg or t_test[1] > best_test_hr:
+            if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr:
                 best_val_ndcg = max(t_valid[0], best_val_ndcg)
                 best_val_hr = max(t_valid[1], best_val_hr)
                 best_test_ndcg = max(t_test[0], best_test_ndcg)
