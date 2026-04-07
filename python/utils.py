@@ -51,26 +51,45 @@ def sample_function(user_train, usernum, itemnum, batch_size, maxlen, result_que
         pos = np.zeros([maxlen], dtype=np.int32)  # 正样本（下一个要预测的物品）
         neg = np.zeros([maxlen], dtype=np.int32)  # 负样本（随机采样的未交互物品）
 
+        ts = set([x[0] for x in user_train[uid]])
+
         nxt = user_train[uid][-1][0]
         idx = maxlen - 1
+        
+        train_seq = user_train[uid]
 
-        ts = set([x[0] for x in user_train[uid]])
-        train_seq = user_train[uid][:-1]  
-
-        #for i, t in reversed(user_train[uid][:-1]):
-        for k in range(len(train_seq) - 1, -1, -1):
-            i, t = train_seq[k]
-            # 计算与上一次交互的时间间隔。如果是第一个交互，间隔记为 0
-            t_prev = train_seq[k - 1][1] if k > 0 else t
-            interval = max(0, t - t_prev) 
-
+        for i, _ in reversed(user_train[uid][:-1]):
             item_seq[idx] = i
-            time_seq[idx] = interval
             pos[idx] = nxt
             neg[idx] = random_neq(1, itemnum + 1, ts)          # Don't need "if nxt != 0"
             nxt = i
             idx -= 1
             if idx == -1: break
+
+        idx = maxlen - 1
+        for k in range(len(train_seq) - 1, -1, -1):
+            _, t = train_seq[k]
+            t_prev = train_seq[k - 1][1] if k > 0 else t
+            inte = max(0, t - t_prev) 
+            time_seq[idx] = inte
+            idx -= 1
+            if idx == -1: break
+
+        # idx = maxlen - 1
+        # #for i, t in reversed(user_train[uid][:-1]):
+        # for k in range(len(train_seq) - 1, -1, -1):
+        #     i, t = train_seq[k]
+        #     # 计算与上一次交互的时间间隔。如果是第一个交互，间隔记为 0
+        #     t_prev = train_seq[k - 1][1] if k > 0 else t
+        #     interval = max(0, t - t_prev) 
+
+        #     item_seq[idx] = i
+        #     time_seq[idx] = interval
+        #     pos[idx] = nxt
+        #     neg[idx] = random_neq(1, itemnum + 1, ts)          # Don't need "if nxt != 0"
+        #     nxt = i
+        #     idx -= 1
+        #     if idx == -1: break
 
         return (uid, [item_seq, time_seq], pos, neg)
 
@@ -181,22 +200,40 @@ def evaluate(model, dataset, args):
         time_seq = np.zeros([args.maxlen], dtype=np.int32)
 
         idx = args.maxlen - 1
+        item_seq[idx] = valid[u][0][0]
+        idx -= 1
+        for i,_ in reversed(train[u]):
+            item_seq[idx] = i
+            idx -= 1
+            if idx == -1: break
 
         full_seq = train[u] + [valid[u][0]]
 
-        # item_seq[idx] = valid[u][0][0]
-        # time_seq[idx] = valid[u][0][1]
+        idx = args.maxlen - 1
+        time_seq[idx] = test[u][0][1] - full_seq[-1][1]
         idx -= 1
-        # for i, t in reversed(train[u]):
         for k in range(len(full_seq) - 1, -1, -1):
-            i, t = full_seq[k]
+            _, t = full_seq[k]
             t_prev = full_seq[k - 1][1] if k > 0 else t
-            interval = max(1, t - t_prev) #防止log出错
-
-            item_seq[idx] = i
-            time_seq[idx] = interval
+            inte = max(0, t - t_prev) 
+            time_seq[idx] = inte
             idx -= 1
             if idx == -1: break
+
+
+        # # item_seq[idx] = valid[u][0][0]
+        # # time_seq[idx] = valid[u][0][1]
+        # # idx -= 1
+        # # for i, t in reversed(train[u]):
+        # for k in range(len(full_seq) - 1, -1, -1):
+        #     i, t = full_seq[k]
+        #     t_prev = full_seq[k - 1][1] if k > 0 else t
+        #     interval = max(1, t - t_prev) #防止log出错
+
+        #     item_seq[idx] = i
+        #     time_seq[idx] = interval
+        #     idx -= 1
+        #     if idx == -1: break
 
         # 构造1+100候选物品列表
         rated = set([x[0] for x in train[u]])
@@ -245,20 +282,36 @@ def evaluate_valid(model, dataset, args):
         # 构建输入序列（只包含训练集物品）
         item_seq = np.zeros([args.maxlen], dtype=np.int32)
         time_seq = np.zeros([args.maxlen], dtype=np.int32)
-        idx = args.maxlen - 1
 
-        full_seq = train[u]
-        
-        # for i, t in reversed(train[u]):
-        for k in range(len(full_seq) - 1, -1, -1):
-            i, t = full_seq[k]
-            t_prev = full_seq[k - 1][1] if k > 0 else t
-            interval = max(0, t - t_prev)
-        
+        idx = args.maxlen - 1
+        for i,_ in reversed(train[u]):
             item_seq[idx] = i
-            time_seq[idx] = interval
             idx -= 1
             if idx == -1: break
+
+        full_seq = train[u]
+
+        idx = args.maxlen - 1
+        time_seq[idx] = valid[u][0][1] - full_seq[-1][1]
+        idx -= 1
+        for k in range(len(full_seq) - 1, -1, -1):
+            _, t = full_seq[k]
+            t_prev = full_seq[k - 1][1] if k > 0 else t
+            inte = max(0, t - t_prev) 
+            time_seq[idx] = inte
+            idx -= 1
+            if idx == -1: break
+        
+        # # for i, t in reversed(train[u]):
+        # for k in range(len(full_seq) - 1, -1, -1):
+        #     i, t = full_seq[k]
+        #     t_prev = full_seq[k - 1][1] if k > 0 else t
+        #     interval = max(0, t - t_prev)
+        
+        #     item_seq[idx] = i
+        #     time_seq[idx] = interval
+        #     idx -= 1
+        #     if idx == -1: break
 
         # 候选物品列表1+100
         rated = set([x[0] for x in train[u]])

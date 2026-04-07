@@ -108,7 +108,7 @@ if __name__ == '__main__':
     adam_optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98))
 
     best_val_ndcg, best_val_hr = 0.0, 0.0
-    best_test_ndcg, best_test_hr = 0.0, 0.0
+    # best_test_ndcg, best_test_hr = 0.0, 0.0
     T = 0.0
     t0 = time.time()
 
@@ -172,8 +172,8 @@ if __name__ == '__main__':
             if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr:
                 best_val_ndcg = max(t_valid[0], best_val_ndcg)
                 best_val_hr = max(t_valid[1], best_val_hr)
-                best_test_ndcg = max(t_test[0], best_test_ndcg)
-                best_test_hr = max(t_test[1], best_test_hr)
+                # best_test_ndcg = max(t_test[0], best_test_ndcg)
+                # best_test_hr = max(t_test[1], best_test_hr)
                 folder = args.dataset + '_' + args.train_dir
                 fname = 'SASRec.epoch={}.lr={}.layer={}.head={}.hidden={}.maxlen={}.pth'
                 fname = fname.format(epoch, args.lr, args.num_blocks, args.num_heads, args.hidden_units, args.maxlen)
