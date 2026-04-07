@@ -210,7 +210,7 @@ def evaluate(model, dataset, args):
         full_seq = train[u] + [valid[u][0]]
 
         idx = args.maxlen - 1
-        time_seq[idx] = test[u][0][1] - full_seq[-1][1]
+        time_seq[idx] = max(test[u][0][1] - full_seq[-1][1])
         idx -= 1
         for k in range(len(full_seq) - 1, -1, -1):
             _, t = full_seq[k]
@@ -292,7 +292,7 @@ def evaluate_valid(model, dataset, args):
         full_seq = train[u]
 
         idx = args.maxlen - 1
-        time_seq[idx] = valid[u][0][1] - full_seq[-1][1]
+        time_seq[idx] = max(0, valid[u][0][1] - full_seq[-1][1])
         idx -= 1
         for k in range(len(full_seq) - 1, -1, -1):
             _, t = full_seq[k]
