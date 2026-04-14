@@ -27,9 +27,15 @@ parser.add_argument('--device', default='cuda', type=str)   # 设备
 parser.add_argument('--inference_only', default=False, type=str2bool) # 是否只进行推理
 parser.add_argument('--state_dict_path', default=None, type=str)      # 预训练模型路径
 parser.add_argument('--norm_first', action='store_true', default=False) # 是否Pre-norm
+
 parser.add_argument('--time_range', default=25, type=int)    # 时间分桶桶数
 parser.add_argument('--time_func', default='log', type=str)  # 时间映射函数
 parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
+
+parser.add_argument('--short_num_blocks', default=2, type=int)    # 短期CNN层数
+parser.add_argument('--short_kernel_size', default=3, type=int)   # 短期卷积核大小
+parser.add_argument('--recent_window', default=5, type=int)       # 最近交互紧凑度窗口
+parser.add_argument('--gate_hidden_units', default=64, type=int)  # 门控MLP隐藏层大小
 
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
@@ -86,7 +92,11 @@ if __name__ == '__main__':
     # 加载预训练模型（如果提供了路径）
     if args.state_dict_path is not None:
         try:
-            model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)))
+            load_result = model.load_state_dict(torch.load(args.state_dict_path, map_location=torch.device(args.device)), strict=False)
+            if len(load_result.missing_keys) > 0:
+                print('missing keys while loading checkpoint:', load_result.missing_keys)
+            if len(load_result.unexpected_keys) > 0:
+                print('unexpected keys while loading checkpoint:', load_result.unexpected_keys)
             tail = args.state_dict_path[args.state_dict_path.find('epoch=') + 6:]
             epoch_start_idx = int(tail[:tail.find('.')]) + 1
         except: # in case your pytorch version is not 1.6 etc., pls debug by pdb if load weights failed
@@ -147,6 +157,9 @@ if __name__ == '__main__':
             # should be torch.norm(param)**2 or the way below which is faster.
             for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2) 
             for param in model.time_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)   
+            for param in model.time_cont_proj.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
+            for param in model.gate_network.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
+            for param in model.short_layers.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
             
             # 反向传播
             loss.backward()

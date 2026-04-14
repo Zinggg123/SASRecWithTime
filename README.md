@@ -28,6 +28,26 @@ output for each run would be slightly random, as negative samples are randomly s
 
 pls check paper author's [repo](https://github.com/kang205/SASRec) for detailed intro and more complete README, and here's the paper bib FYI :)
 
+## Time-aware parallel long-short architecture
+
+This workspace version extends the original SASRec with a parallel short-term CNN branch and a time-interval-driven dynamic gate.
+
+- Long-term branch: the original causal self-attention stack, used to capture stable user habits.
+- Short-term branch: a causal CNN stack, used to capture recent impulses and local pattern shifts.
+- Time-aware gate: combines discrete time buckets, continuous interval features, and recent interaction compactness to decide how much each branch contributes at every position.
+
+New training options:
+
+```
+--short_num_blocks=2 --short_kernel_size=3 --recent_window=5 --gate_hidden_units=64
+```
+
+Example:
+
+```
+python main.py --dataset=ml-1m --train_dir=default --maxlen=200 --dropout_rate=0.2 --device=cuda --short_num_blocks=2 --short_kernel_size=3 --recent_window=5
+```
+
 ```
 @inproceedings{kang2018self,
   title={Self-attentive sequential recommendation},
