@@ -80,7 +80,11 @@ class SASRec(torch.nn.Module):
         self.short_kernel_size = getattr(args, 'short_kernel_size', 3)
         self.short_num_blocks = getattr(args, 'short_num_blocks', 2)
         self.gate_hidden_units = getattr(args, 'gate_hidden_units', args.hidden_units)
+
         self.use_cnn = getattr(args, 'use_cnn', True)
+        self.use_normalized_gap = getattr(args, 'use_normalized_gap', True)
+        self.use_recent_compactness = getattr(args, 'use_recent_compactness', True)
+        self.use_recency_score = getattr(args, 'use_recency_score', True)
         self.time_norm = math.log1p(max(self.time_num, 1))
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
@@ -184,11 +188,18 @@ class SASRec(torch.nn.Module):
         recent_compactness = self._recent_compactness(time_tensor, valid_mask)
         recency_score = torch.exp(-normalized_gap) * valid_mask # 当前间隔的新近性分数
 
-        continuous_time = torch.stack([normalized_gap, recent_compactness, recency_score], dim=-1)
+        normalized_gap_feature = normalized_gap if self.use_normalized_gap else torch.zeros_like(normalized_gap)
+        recent_compactness_feature = recent_compactness if self.use_recent_compactness else torch.zeros_like(recent_compactness)
+        recency_score_feature = recency_score if self.use_recency_score else torch.zeros_like(recency_score)
+
+        continuous_time = torch.stack([normalized_gap_feature, recent_compactness_feature, recency_score_feature], dim=-1)
         time_continuous_emb = self.time_cont_proj(continuous_time) # 线性层学习组合方式
 
         time_context = time_bucket_emb + time_continuous_emb
-        return time_context, recent_compactness.unsqueeze(-1), recency_score.unsqueeze(-1)
+        recent_compactness_gate = recent_compactness.unsqueeze(-1) if self.use_recent_compactness else torch.zeros_like(recent_compactness.unsqueeze(-1))
+        recency_score_gate = recency_score.unsqueeze(-1) if self.use_recency_score else torch.zeros_like(recency_score.unsqueeze(-1))
+        
+        return time_context, recent_compactness_gate, recency_score_gate
 
     def _encode_long_branch(self, seqs):
         tl = seqs.shape[1]

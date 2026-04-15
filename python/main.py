@@ -32,12 +32,15 @@ parser.add_argument('--time_range', default=25, type=int)    # 时间分桶桶�
 parser.add_argument('--time_func', default='log', type=str)  # 时间映射函数
 parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
 
+parser.add_argument('--use_normalized_gap', default=True, type=str2bool)        # 是否使用归一化时间间隔
+parser.add_argument('--use_recent_compactness', default=True, type=str2bool)    # 是否使用最近紧凑度
+parser.add_argument('--use_recency_score', default=True, type=str2bool)         # 是否使用新近性分数
+
+parser.add_argument('--use_cnn', default=True, type=str2bool)                   # 是否使用短期CNN分支
 parser.add_argument('--short_num_blocks', default=2, type=int)    # 短期CNN层数
 parser.add_argument('--short_kernel_size', default=3, type=int)   # 短期卷积核大小
 parser.add_argument('--recent_window', default=5, type=int)       # 最近交互紧凑度窗口
 parser.add_argument('--gate_hidden_units', default=64, type=int)  # 门控MLP隐藏层大小
-
-parser.add_argument('--use_cnn', default=True, type=str2bool)     # 是否启用短期CNN分支与门控融合
 
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
