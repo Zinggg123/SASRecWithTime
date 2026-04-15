@@ -37,6 +37,8 @@ parser.add_argument('--short_kernel_size', default=3, type=int)   # 短期卷积
 parser.add_argument('--recent_window', default=5, type=int)       # 最近交互紧凑度窗口
 parser.add_argument('--gate_hidden_units', default=64, type=int)  # 门控MLP隐藏层大小
 
+parser.add_argument('--use_cnn', default=True, type=str2bool)     # 是否启用短期CNN分支与门控融合
+
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
     os.makedirs(args.dataset + '_' + args.train_dir)
@@ -158,8 +160,10 @@ if __name__ == '__main__':
             for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2) 
             for param in model.time_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)   
             for param in model.time_cont_proj.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
-            for param in model.gate_network.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
-            for param in model.short_layers.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
+            if model.gate_network is not None:
+                for param in model.gate_network.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
+            if len(model.short_layers) > 0:
+                for param in model.short_layers.parameters(): loss += args.l2_emb * torch.sum(param ** 2)
             
             # 反向传播
             loss.backward()

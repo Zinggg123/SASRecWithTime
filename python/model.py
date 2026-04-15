@@ -80,6 +80,7 @@ class SASRec(torch.nn.Module):
         self.short_kernel_size = getattr(args, 'short_kernel_size', 3)
         self.short_num_blocks = getattr(args, 'short_num_blocks', 2)
         self.gate_hidden_units = getattr(args, 'gate_hidden_units', args.hidden_units)
+        self.use_cnn = getattr(args, 'use_cnn', True)
         self.time_norm = math.log1p(max(self.time_num, 1))
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
@@ -98,20 +99,23 @@ class SASRec(torch.nn.Module):
         self.forward_layernorms = torch.nn.ModuleList()   # 每层的前馈网络的LayerNorm
         self.forward_layers = torch.nn.ModuleList()       # 每层的前馈网络
 
-        # 短期并行分支：用因果CNN捕获局部冲动模式
+        # 短期并行分支：可按开关关闭，便于做不使用CNN的消融实验
         self.short_layers = torch.nn.ModuleList()
-        for _ in range(self.short_num_blocks):
-            self.short_layers.append(CausalConvBlock(args.hidden_units, args.dropout_rate, self.short_kernel_size))
-        self.short_output_norm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
+        self.short_output_norm = None
+        self.gate_network = None
+        if self.use_cnn and self.short_num_blocks > 0:
+            for _ in range(self.short_num_blocks):
+                self.short_layers.append(CausalConvBlock(args.hidden_units, args.dropout_rate, self.short_kernel_size))
+            self.short_output_norm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
 
-        # 动态门控：由时间间隔、最近交互紧凑度和两路表示共同决定融合比例
-        gate_input_dim = args.hidden_units * 3 + 2
-        self.gate_network = torch.nn.Sequential(
-            torch.nn.Linear(gate_input_dim, self.gate_hidden_units),
-            torch.nn.GELU(),
-            torch.nn.Dropout(p=args.dropout_rate),
-            torch.nn.Linear(self.gate_hidden_units, 1)
-        )
+            # 动态门控：由时间间隔、最近交互紧凑度和两路表示共同决定融合比例
+            gate_input_dim = args.hidden_units * 3 + 2
+            self.gate_network = torch.nn.Sequential(
+                torch.nn.Linear(gate_input_dim, self.gate_hidden_units),
+                torch.nn.GELU(),
+                torch.nn.Dropout(p=args.dropout_rate),
+                torch.nn.Linear(self.gate_hidden_units, 1)
+            )
 
         # 最后的LayerNorm
         self.last_layernorm = torch.nn.LayerNorm(args.hidden_units, eps=1e-8)
@@ -207,6 +211,8 @@ class SASRec(torch.nn.Module):
         return seqs
 
     def _encode_short_branch(self, seqs):
+        if len(self.short_layers) == 0 or self.short_output_norm is None:
+            return seqs
         short_seqs = seqs
         for block in self.short_layers:
             short_seqs = block(short_seqs)
@@ -236,13 +242,17 @@ class SASRec(torch.nn.Module):
 
         # 长短期并行编码
         long_feats = self._encode_long_branch(seqs)
-        short_feats = self._encode_short_branch(seqs)
+        if self.gate_network is not None:
+            short_feats = self._encode_short_branch(seqs)
 
-        # 时间间隔驱动的动态门控：近期越紧凑，越偏向短期分支
-        gate_inputs = torch.cat([long_feats, short_feats, time_context, recent_compactness, recency_score], dim=-1)
-        gate = torch.sigmoid(self.gate_network(gate_inputs))
+            # 时间间隔驱动的动态门控：近期越紧凑，越偏向短期分支
+            gate_inputs = torch.cat([long_feats, short_feats, time_context, recent_compactness, recency_score], dim=-1)
+            gate = torch.sigmoid(self.gate_network(gate_inputs))
+            log_feats = gate * short_feats + (1 - gate) * long_feats
+        else:
+            # 仅保留时间增强后的长程Transformer分支
+            log_feats = long_feats
 
-        log_feats = gate * short_feats + (1 - gate) * long_feats
         log_feats = self.last_layernorm(log_feats) # 最终的特征表示 # (U, T, C) -> (U, -1, C)
         log_feats = log_feats * torch.LongTensor(log_seqs).to(self.dev).ne(0).unsqueeze(-1).float()
 
