@@ -172,16 +172,16 @@ class SASRec(torch.nn.Module):
 
         time_bucket = time_bucket.long().clamp(1, self.time_num)
         time_bucket = time_bucket * valid_mask.long()
-        time_bucket_emb = self.time_emb(time_bucket)
+        time_bucket_emb = self.time_emb(time_bucket) # 离散时间桶
 
-        normalized_gap = torch.log1p(time_tensor) / self.time_norm
-        normalized_gap = normalized_gap * valid_mask
+        normalized_gap = torch.log1p(time_tensor) / self.time_norm # 归一至可控范围，避免数值过大导致训练不稳定
+        normalized_gap = normalized_gap * valid_mask # 连续时间间隔
 
         recent_compactness = self._recent_compactness(time_tensor, valid_mask)
-        recency_score = torch.exp(-normalized_gap) * valid_mask
+        recency_score = torch.exp(-normalized_gap) * valid_mask # 当前间隔的新近性分数
 
         continuous_time = torch.stack([normalized_gap, recent_compactness, recency_score], dim=-1)
-        time_continuous_emb = self.time_cont_proj(continuous_time)
+        time_continuous_emb = self.time_cont_proj(continuous_time) # 线性层学习组合方式
 
         time_context = time_bucket_emb + time_continuous_emb
         return time_context, recent_compactness.unsqueeze(-1), recency_score.unsqueeze(-1)
