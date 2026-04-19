@@ -52,6 +52,42 @@ def non_empty_feature_subsets(prefix):
     return subsets
 
 
+def parse_b1a_config_spec(spec):
+    parts = [piece.strip() for piece in spec.split(',') if piece.strip()]
+    values = {}
+    for part in parts:
+        if '=' not in part:
+            raise ValueError(f'Invalid --b1a_config item: {spec!r}. Expected key=value pairs.')
+        key, value = part.split('=', 1)
+        values[key.strip().lower()] = value.strip()
+
+    def read_int(*names):
+        for name in names:
+            if name in values:
+                return int(values[name])
+        raise ValueError(f'Missing required field in --b1a_config: one of {names!r} is required. Full item: {spec!r}')
+
+    cfg_name = values.get('name') or values.get('config_name') or values.get('cfg_name')
+    short_num_blocks = read_int('blocks', 'short_num_blocks', 'num_blocks')
+    short_kernel_size = read_int('kernel', 'short_kernel_size')
+    recent_window = read_int('window', 'recent_window')
+    gate_hidden_units = read_int('gate', 'gate_hidden_units')
+
+    if cfg_name is None:
+        cfg_name = f'cnn_b{short_num_blocks}_k{short_kernel_size}_w{recent_window}_g{gate_hidden_units}'
+
+    return cfg_name, {
+        'use_cnn': True,
+        'short_num_blocks': short_num_blocks,
+        'short_kernel_size': short_kernel_size,
+        'recent_window': recent_window,
+        'gate_hidden_units': gate_hidden_units,
+        'cnn_use_normalized_gap': True,
+        'cnn_use_recent_compactness': True,
+        'cnn_use_recency_score': True,
+    }
+
+
 def build_command(dataset, train_dir, seed, config):
     cmd = [sys.executable, 'main.py', f'--dataset={dataset}', f'--train_dir={train_dir}', f'--seed={seed}']
     for key, value in config.items():
@@ -112,11 +148,17 @@ def parse_log(log_path):
                 pass
         val_ndcg_txt = row.get('val_ndcg', 'NA')
         val_hr_txt = row.get('val_hr', 'NA')
-        if val_ndcg_txt != 'NA' and val_hr_txt != 'NA':
+        test_ndcg_txt = row.get('test_ndcg', 'NA')
+        test_hr_txt = row.get('test_hr', 'NA')
+        if val_ndcg_txt != 'NA' and val_hr_txt != 'NA' and test_ndcg_txt != 'NA' and test_hr_txt != 'NA':
             try:
-                float(val_ndcg_txt)
-                float(val_hr_txt)
-                eval_rows.append(row)
+                eval_rows.append({
+                    'epoch': int(row['epoch']),
+                    'val_ndcg': float(val_ndcg_txt),
+                    'val_hr': float(val_hr_txt),
+                    'test_ndcg': float(test_ndcg_txt),
+                    'test_hr': float(test_hr_txt),
+                })
             except ValueError:
                 pass
 
@@ -126,18 +168,18 @@ def parse_log(log_path):
         best_val_hr_seen = float('-inf')
         best_row = None
         for row in eval_rows:
-            cur_val_ndcg = float(row['val_ndcg'])
-            cur_val_hr = float(row['val_hr'])
+            cur_val_ndcg = row['val_ndcg']
+            cur_val_hr = row['val_hr']
             if cur_val_ndcg > best_val_ndcg_seen or cur_val_hr > best_val_hr_seen:
                 best_val_ndcg_seen = max(best_val_ndcg_seen, cur_val_ndcg)
                 best_val_hr_seen = max(best_val_hr_seen, cur_val_hr)
                 best_row = row
 
-        best_epoch = int(best_row['epoch'])
-        best_val_ndcg = float(best_row['val_ndcg'])
-        best_val_hr = float(best_row['val_hr'])
-        test_ndcg = float(best_row['test_ndcg'])
-        test_hr = float(best_row['test_hr'])
+        best_epoch = best_row['epoch']
+        best_val_ndcg = best_row['val_ndcg']
+        best_val_hr = best_row['val_hr']
+        test_ndcg = best_row['test_ndcg']
+        test_hr = best_row['test_hr']
     else:
         best_epoch = None
         best_val_ndcg = None
@@ -403,6 +445,13 @@ def main():
 
     parser.add_argument('--gate_hidden_units', nargs='+', type=int, default=[32, 64])
 
+    parser.add_argument(
+        '--b1a_config',
+        action='append',
+        default=[],
+        help='Explicit B1a candidate config, repeated once per run item. Example: --b1a_config blocks=1,kernel=3,window=5,gate=32',
+    ) # --b1a_config "name=b1k2w5g32,blocks=1,kernel=2,window=5,gate=32"
+
     args = parser.parse_args()
     if args.max_parallel < 1:
         raise ValueError('max_parallel must be >= 1')
@@ -571,25 +620,34 @@ def main():
 
     # Stage B1a: CNN structure search with all CNN continuous features enabled
     b1a_configs = []
-    for n_blocks, ksz, rw, ghu in itertools.product(
-        args.short_num_blocks,
-        args.short_kernel_sizes,
-        args.recent_windows,
-        args.gate_hidden_units,
-    ):
-        name = f'cnn_struct_b{n_blocks}_k{ksz}_w{rw}_g{ghu}'
-        cfg = dict(top1_long_cfg)
-        cfg.update({
-            'use_cnn': True,
-            'short_num_blocks': n_blocks,
-            'short_kernel_size': ksz,
-            'recent_window': rw,
-            'gate_hidden_units': ghu,
-            'cnn_use_normalized_gap': True,
-            'cnn_use_recent_compactness': True,
-            'cnn_use_recency_score': True,
-        })
-        b1a_configs.append((name, cfg))
+    if args.b1a_config:
+        for spec in args.b1a_config:
+            cfg_name, cfg = parse_b1a_config_spec(spec)
+            merged_cfg = dict(top1_long_cfg)
+            merged_cfg.update(cfg)
+            b1a_configs.append((cfg_name, merged_cfg))
+    else:
+        # Backward-compatible fallback: keep the old full grid when no explicit
+        # candidates are supplied via --b1a_config.
+        for n_blocks, ksz, rw, ghu in itertools.product(
+            args.short_num_blocks,
+            args.short_kernel_sizes,
+            args.recent_windows,
+            args.gate_hidden_units,
+        ):
+            name = f'cnn_struct_b{n_blocks}_k{ksz}_w{rw}_g{ghu}'
+            cfg = dict(top1_long_cfg)
+            cfg.update({
+                'use_cnn': True,
+                'short_num_blocks': n_blocks,
+                'short_kernel_size': ksz,
+                'recent_window': rw,
+                'gate_hidden_units': ghu,
+                'cnn_use_normalized_gap': True,
+                'cnn_use_recent_compactness': True,
+                'cnn_use_recency_score': True,
+            })
+            b1a_configs.append((name, cfg))
 
     _, b1a_global = run_stage('B1a', b1a_configs)
     best_b1a = select_best_config(b1a_global, 'B1a')
