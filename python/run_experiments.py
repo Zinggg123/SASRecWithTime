@@ -5,6 +5,7 @@ import itertools
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from statistics import mean, pstdev
@@ -65,10 +66,22 @@ def parse_log(log_path):
         return None
 
     rows = []
-    with open(log_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            rows.append(row)
+    try:
+        with open(log_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+    except OSError:
+        return {
+            'status': 'log_read_io_error',
+            'mean_loss': None,
+            'last_loss': None,
+            'best_epoch': None,
+            'best_val_ndcg': None,
+            'best_val_hr': None,
+            'test_ndcg_at_best_val': None,
+            'test_hr_at_best_val': None,
+        }
 
     numeric_rows = []
     for row in rows:
@@ -93,10 +106,19 @@ def parse_log(log_path):
     for row in numeric_rows:
         loss_txt = row.get('loss', 'NA')
         if loss_txt != 'NA':
-            losses.append(float(loss_txt))
+            try:
+                losses.append(float(loss_txt))
+            except ValueError:
+                pass
         val_ndcg_txt = row.get('val_ndcg', 'NA')
-        if val_ndcg_txt != 'NA':
-            eval_rows.append(row)
+        val_hr_txt = row.get('val_hr', 'NA')
+        if val_ndcg_txt != 'NA' and val_hr_txt != 'NA':
+            try:
+                float(val_ndcg_txt)
+                float(val_hr_txt)
+                eval_rows.append(row)
+            except ValueError:
+                pass
 
     if eval_rows:
         # Keep consistent with main.py: update best when val_ndcg OR val_hr improves.
@@ -141,7 +163,32 @@ def stable_config_id(stage, cfg_name, config):
     return f'{stage}_{sanitize_name(cfg_name)}_{digest}'
 
 
-def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, resume):
+def make_failed_row(dataset, seed_index, seed, stage, cfg_name, config, config_id, train_dir, status, error_message):
+    return {
+        'row_type': 'run',
+        'status': status,
+        'log_parse_status': None,
+        'dataset': dataset,
+        'repeat': seed_index,
+        'seed_index': seed_index,
+        'stage': stage,
+        'config_name': cfg_name,
+        'config_id': config_id,
+        'train_dir': train_dir,
+        'seed': seed,
+        'error_message': error_message,
+        **flatten_config(config),
+        'mean_loss': None,
+        'last_loss': None,
+        'best_epoch': None,
+        'best_val_ndcg': None,
+        'best_val_hr': None,
+        'test_ndcg_at_best_val': None,
+        'test_hr_at_best_val': None,
+    }
+
+
+def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, resume, io_retries, retry_backoff_sec):
     config_id = stable_config_id(stage, cfg_name, config)
     train_dir = f'auto_{config_id}_s{seed}'
     run_folder = os.path.join(python_dir, f'{dataset}_{train_dir}')
@@ -176,8 +223,45 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
     stdout_path = os.path.join(run_folder, 'runner_stdout.log')
     stderr_path = os.path.join(run_folder, 'runner_stderr.log')
 
-    with open(stdout_path, 'w', encoding='utf-8') as out, open(stderr_path, 'w', encoding='utf-8') as err:
-        proc = subprocess.run(cmd, cwd=python_dir, stdout=out, stderr=err)
+    proc = None
+    last_exc = None
+    for attempt in range(io_retries + 1):
+        try:
+            with open(stdout_path, 'w', encoding='utf-8') as out, open(stderr_path, 'w', encoding='utf-8') as err:
+                proc = subprocess.run(cmd, cwd=python_dir, stdout=out, stderr=err)
+            break
+        except OSError as exc:
+            last_exc = exc
+            if attempt < io_retries:
+                wait_sec = retry_backoff_sec * (2 ** attempt)
+                print(f'[retry] {stage} {cfg_name} seed={seed} OSError({getattr(exc, "errno", "NA")}) while opening log/subprocess I/O, retry {attempt + 1}/{io_retries} after {wait_sec:.2f}s')
+                time.sleep(wait_sec)
+                continue
+            return make_failed_row(
+                dataset=dataset,
+                seed_index=seed_index,
+                seed=seed,
+                stage=stage,
+                cfg_name=cfg_name,
+                config=config,
+                config_id=config_id,
+                train_dir=train_dir,
+                status='failed_io',
+                error_message=f'OSError: {last_exc}',
+            )
+        except Exception as exc:
+            return make_failed_row(
+                dataset=dataset,
+                seed_index=seed_index,
+                seed=seed,
+                stage=stage,
+                cfg_name=cfg_name,
+                config=config,
+                config_id=config_id,
+                train_dir=train_dir,
+                status='failed_exception',
+                error_message=f'{type(exc).__name__}: {exc}',
+            )
 
     # Prefer the new canonical log filename, but keep compatibility for older runs.
     post_log_path = log_path if os.path.isfile(log_path) else legacy_log_path
@@ -306,6 +390,9 @@ def main():
     parser.add_argument('--max_parallel', type=int, default=3)
     parser.add_argument('--resume', type=lambda s: s.lower() == 'true', default=True)
     parser.add_argument('--output_csv', default='experiment_master.csv')
+    
+    parser.add_argument('--io_retries', type=int, default=3)
+    parser.add_argument('--retry_backoff_sec', type=float, default=1.0)
 
     parser.add_argument('--time_ranges', nargs='+', type=int, default=[25, 40, 60])
     parser.add_argument('--time_scales', nargs='+', type=float, default=[1.0, 2.0, 3.0, 4.0])
@@ -319,6 +406,10 @@ def main():
     args = parser.parse_args()
     if args.max_parallel < 1:
         raise ValueError('max_parallel must be >= 1')
+    if args.io_retries < 0:
+        raise ValueError('io_retries must be >= 0')
+    if args.retry_backoff_sec < 0:
+        raise ValueError('retry_backoff_sec must be >= 0')
 
     python_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -342,9 +433,9 @@ def main():
             return [], []
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
+            futures = {}
             for cfg_name, cfg, dataset, seed_index, seed, _ in stage_tasks:
-                futures.append(executor.submit(
+                fut = executor.submit(
                     run_spec,
                     python_dir,
                     dataset,
@@ -354,11 +445,31 @@ def main():
                     cfg_name,
                     cfg,
                     args.resume,
-                ))
+                    args.io_retries,
+                    args.retry_backoff_sec,
+                )
+                futures[fut] = (cfg_name, cfg, dataset, seed_index, seed)
 
             finished = 0
             for fut in as_completed(futures):
-                row = fut.result()
+                cfg_name, cfg, dataset, seed_index, seed = futures[fut]
+                try:
+                    row = fut.result()
+                except Exception as exc:
+                    config_id = stable_config_id(stage, cfg_name, cfg)
+                    train_dir = f'auto_{config_id}_s{seed}'
+                    row = make_failed_row(
+                        dataset=dataset,
+                        seed_index=seed_index,
+                        seed=seed,
+                        stage=stage,
+                        cfg_name=cfg_name,
+                        config=cfg,
+                        config_id=config_id,
+                        train_dir=train_dir,
+                        status='failed_future_exception',
+                        error_message=f'{type(exc).__name__}: {exc}',
+                    )
                 stage_rows.append(row)
                 finished += 1
                 print(f"[{stage}] finished {finished}/{total_tasks} | {row['dataset']} | {row['config_name']} | seed={row['seed']} | status={row['status']}")

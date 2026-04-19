@@ -6,6 +6,19 @@ import numpy as np
 from collections import defaultdict
 from multiprocessing import Process, Queue
 
+
+def _safe_progress_dot():
+    """
+    安全打印评估进度点，避免在重定向/并行环境中因stdout异常导致评估中断。
+    """
+    try:
+        print('.', end="")
+        sys.stdout.flush()
+    except OSError:
+        # Some environments (e.g., background workers, detached stdout) can raise
+        # OSError: [Errno 5] Input/output error when flushing stdout.
+        pass
+
 def build_index(dataset_name):
     """
     构建用户-物品索引映射
@@ -256,8 +269,7 @@ def evaluate(model, dataset, args):
             NDCG += 1 / np.log2(rank + 2)
             HT += 1
         if valid_user % 100 == 0:
-            print('.', end="")
-            sys.stdout.flush()
+            _safe_progress_dot()
 
     return NDCG / valid_user, HT / valid_user
 
@@ -333,7 +345,6 @@ def evaluate_valid(model, dataset, args):
             NDCG += 1 / np.log2(rank + 2)
             HT += 1
         if valid_user % 100 == 0:
-            print('.', end="")
-            sys.stdout.flush()
+            _safe_progress_dot()
 
     return NDCG / valid_user, HT / valid_user
