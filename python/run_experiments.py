@@ -152,9 +152,12 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
     if resume and os.path.isfile(existing_log_path):
         metrics = parse_log(existing_log_path)
         if metrics and metrics['status'] == 'ok':
+            log_parse_status = metrics.get('status')
+            metrics_wo_status = {k: v for k, v in metrics.items() if k != 'status'}
             return {
                 'row_type': 'run',
                 'status': 'skipped_resume',
+                'log_parse_status': log_parse_status,
                 'dataset': dataset,
                 'repeat': seed_index,
                 'seed_index': seed_index,
@@ -164,7 +167,7 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
                 'train_dir': train_dir,
                 'seed': seed,
                 **flatten_config(config),
-                **metrics,
+                **metrics_wo_status,
             }
 
     cmd = build_command(dataset, train_dir, seed, config)
@@ -192,10 +195,13 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
         }
 
     status = 'ok' if proc.returncode == 0 and metrics.get('status') == 'ok' else f'failed_rc_{proc.returncode}'
+    log_parse_status = metrics.get('status')
+    metrics_wo_status = {k: v for k, v in metrics.items() if k != 'status'}
 
     return {
         'row_type': 'run',
         'status': status,
+        'log_parse_status': log_parse_status,
         'dataset': dataset,
         'repeat': seed_index,
         'seed_index': seed_index,
@@ -205,7 +211,7 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
         'train_dir': train_dir,
         'seed': seed,
         **flatten_config(config),
-        **metrics,
+        **metrics_wo_status,
     }
 
 
@@ -254,10 +260,24 @@ def aggregate_rows(run_rows, by_keys):
 
 
 def select_best_config(aggregate_rows_list, stage):
-    rows = [r for r in aggregate_rows_list if r.get('stage') == stage and r.get('best_val_ndcg_mean') is not None]
+    rows = [
+        r for r in aggregate_rows_list
+        if r.get('stage') == stage
+        and r.get('best_val_ndcg_mean') is not None
+        and r.get('best_val_hr_mean') is not None
+    ]
     if not rows:
         return None
-    return max(rows, key=lambda r: r['best_val_ndcg_mean'])
+
+    # Keep selection behavior aligned with main.py spirit: prioritize NDCG,
+    # and use HR only as tie-breaker (no additive score).
+    return max(
+        rows,
+        key=lambda r: (
+            r['best_val_ndcg_mean'],
+            r['best_val_hr_mean'],
+        ),
+    )
 
 
 def write_master_table(path, all_rows):
@@ -420,8 +440,16 @@ def main():
 
     _, a2_global = run_stage('A2', a2_configs)
     a2_ranked = sorted(
-        [r for r in a2_global if r.get('stage') == 'A2' and r.get('best_val_ndcg_mean') is not None],
-        key=lambda r: r['best_val_ndcg_mean'],
+        [
+            r for r in a2_global
+            if r.get('stage') == 'A2'
+            and r.get('best_val_ndcg_mean') is not None
+            and r.get('best_val_hr_mean') is not None
+        ],
+        key=lambda r: (
+            r['best_val_ndcg_mean'],
+            r['best_val_hr_mean'],
+        ),
         reverse=True,
     )
     if not a2_ranked:
@@ -473,8 +501,16 @@ def main():
 
     _, b1b_global = run_stage('B1b', b1b_configs)
     b1b_ranked = sorted(
-        [r for r in b1b_global if r.get('stage') == 'B1b' and r.get('best_val_ndcg_mean') is not None],
-        key=lambda r: r['best_val_ndcg_mean'],
+        [
+            r for r in b1b_global
+            if r.get('stage') == 'B1b'
+            and r.get('best_val_ndcg_mean') is not None
+            and r.get('best_val_hr_mean') is not None
+        ],
+        key=lambda r: (
+            r['best_val_ndcg_mean'],
+            r['best_val_hr_mean'],
+        ),
         reverse=True,
     )
     if not b1b_ranked:
