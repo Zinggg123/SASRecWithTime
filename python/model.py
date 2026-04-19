@@ -85,6 +85,27 @@ class SASRec(torch.nn.Module):
         self.use_normalized_gap = getattr(args, 'use_normalized_gap', True)
         self.use_recent_compactness = getattr(args, 'use_recent_compactness', True)
         self.use_recency_score = getattr(args, 'use_recency_score', True)
+        
+        self.long_use_normalized_gap = getattr(args, 'long_use_normalized_gap', None)
+        self.long_use_recent_compactness = getattr(args, 'long_use_recent_compactness', None)
+        self.long_use_recency_score = getattr(args, 'long_use_recency_score', None)
+        self.cnn_use_normalized_gap = getattr(args, 'cnn_use_normalized_gap', None)
+        self.cnn_use_recent_compactness = getattr(args, 'cnn_use_recent_compactness', None)
+        self.cnn_use_recency_score = getattr(args, 'cnn_use_recency_score', None)
+
+        # backward compatibility: if branch-specific switches are not set, inherit from global switches
+        if self.long_use_normalized_gap is None:
+            self.long_use_normalized_gap = self.use_normalized_gap
+        if self.long_use_recent_compactness is None:
+            self.long_use_recent_compactness = self.use_recent_compactness
+        if self.long_use_recency_score is None:
+            self.long_use_recency_score = self.use_recency_score
+        if self.cnn_use_normalized_gap is None:
+            self.cnn_use_normalized_gap = self.use_normalized_gap
+        if self.cnn_use_recent_compactness is None:
+            self.cnn_use_recent_compactness = self.use_recent_compactness
+        if self.cnn_use_recency_score is None:
+            self.cnn_use_recency_score = self.use_recency_score
         self.time_norm = math.log1p(max(self.time_num, 1))
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
@@ -167,7 +188,7 @@ class SASRec(torch.nn.Module):
 
     def _build_time_features(self, log_seqs, time_seqs):
         """
-        同时构建离散时间桶、连续时间间隔和最近紧凑度特征。
+        构建长分支和短分支各自的时间上下文，以及门控使用的时间信号。
         """
         log_tensor = torch.LongTensor(log_seqs).to(self.dev)
         time_tensor = torch.LongTensor(time_seqs).to(self.dev).float()
@@ -188,18 +209,26 @@ class SASRec(torch.nn.Module):
         recent_compactness = self._recent_compactness(time_tensor, valid_mask)
         recency_score = torch.exp(-normalized_gap) * valid_mask # 当前间隔的新近性分数
 
-        normalized_gap_feature = normalized_gap if self.use_normalized_gap else torch.zeros_like(normalized_gap)
-        recent_compactness_feature = recent_compactness if self.use_recent_compactness else torch.zeros_like(recent_compactness)
-        recency_score_feature = recency_score if self.use_recency_score else torch.zeros_like(recency_score)
+        long_normalized_gap_feature = normalized_gap if self.long_use_normalized_gap else torch.zeros_like(normalized_gap)
+        long_recent_compactness_feature = recent_compactness if self.long_use_recent_compactness else torch.zeros_like(recent_compactness)
+        long_recency_score_feature = recency_score if self.long_use_recency_score else torch.zeros_like(recency_score)
 
-        continuous_time = torch.stack([normalized_gap_feature, recent_compactness_feature, recency_score_feature], dim=-1)
-        time_continuous_emb = self.time_cont_proj(continuous_time) # 线性层学习组合方式
+        cnn_normalized_gap_feature = normalized_gap if self.cnn_use_normalized_gap else torch.zeros_like(normalized_gap)
+        cnn_recent_compactness_feature = recent_compactness if self.cnn_use_recent_compactness else torch.zeros_like(recent_compactness)
+        cnn_recency_score_feature = recency_score if self.cnn_use_recency_score else torch.zeros_like(recency_score)
 
-        time_context = time_bucket_emb + time_continuous_emb
-        recent_compactness_gate = recent_compactness.unsqueeze(-1) if self.use_recent_compactness else torch.zeros_like(recent_compactness.unsqueeze(-1))
-        recency_score_gate = recency_score.unsqueeze(-1) if self.use_recency_score else torch.zeros_like(recency_score.unsqueeze(-1))
+        long_continuous_time = torch.stack([long_normalized_gap_feature, long_recent_compactness_feature, long_recency_score_feature], dim=-1)
+        long_time_continuous_emb = self.time_cont_proj(long_continuous_time) # 线性层学习组合方式
+
+        cnn_continuous_time = torch.stack([cnn_normalized_gap_feature, cnn_recent_compactness_feature, cnn_recency_score_feature], dim=-1)
+        cnn_time_continuous_emb = self.time_cont_proj(cnn_continuous_time)
+
+        long_time_context = time_bucket_emb + long_time_continuous_emb
+        cnn_time_context = time_bucket_emb + cnn_time_continuous_emb
+        recent_compactness_gate = recent_compactness.unsqueeze(-1) if self.cnn_use_recent_compactness else torch.zeros_like(recent_compactness.unsqueeze(-1))
+        recency_score_gate = recency_score.unsqueeze(-1) if self.cnn_use_recency_score else torch.zeros_like(recency_score.unsqueeze(-1))
         
-        return time_context, recent_compactness_gate, recency_score_gate
+        return long_time_context, cnn_time_context, recent_compactness_gate, recency_score_gate
 
     def _encode_long_branch(self, seqs):
         tl = seqs.shape[1]
@@ -245,19 +274,18 @@ class SASRec(torch.nn.Module):
         poss *= (log_seqs != 0)  # 掩码，非0位置才添加位置信息
         seqs += self.pos_emb(torch.LongTensor(poss).to(self.dev))
 
-        # 时间特征：离散时间桶 + 连续间隔 + 最近紧凑度
-        time_context, recent_compactness, recency_score = self._build_time_features(log_seqs, time_seqs)
-        seqs = seqs + time_context
-
-        seqs = self.emb_dropout(seqs) # dropout
+        # 时间特征：长分支和短分支可独立启用不同的连续时间特征子集
+        long_time_context, cnn_time_context, recent_compactness, recency_score = self._build_time_features(log_seqs, time_seqs)
+        long_seqs = self.emb_dropout(seqs + long_time_context) # dropout
 
         # 长短期并行编码
-        long_feats = self._encode_long_branch(seqs)
+        long_feats = self._encode_long_branch(long_seqs)
         if self.gate_network is not None:
-            short_feats = self._encode_short_branch(seqs)
+            short_seqs = self.emb_dropout(seqs + cnn_time_context)
+            short_feats = self._encode_short_branch(short_seqs)
 
             # 时间间隔驱动的动态门控：近期越紧凑，越偏向短期分支
-            gate_inputs = torch.cat([long_feats, short_feats, time_context, recent_compactness, recency_score], dim=-1)
+            gate_inputs = torch.cat([long_feats, short_feats, cnn_time_context, recent_compactness, recency_score], dim=-1)
             gate = torch.sigmoid(self.gate_network(gate_inputs))
             log_feats = gate * short_feats + (1 - gate) * long_feats
         else:

@@ -1,7 +1,9 @@
 import os
 import time
+import random
 import torch
 import argparse
+import numpy as np
 
 from model import SASRec
 from utils import *
@@ -10,6 +12,14 @@ def str2bool(s):
     if s not in {'false', 'true'}:
         raise ValueError('Not a valid boolean string')
     return s == 'true'
+
+def str2tristate(s):
+    lowered = s.lower()
+    if lowered not in {'false', 'true', 'none'}:
+        raise ValueError('Not a valid tristate string, expected true/false/none')
+    if lowered == 'none':
+        return None
+    return lowered == 'true'
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--dataset', required=True)             # 数据集名称
@@ -28,6 +38,8 @@ parser.add_argument('--inference_only', default=False, type=str2bool) # 是否�
 parser.add_argument('--state_dict_path', default=None, type=str)      # 预训练模型路径
 parser.add_argument('--norm_first', action='store_true', default=False) # 是否Pre-norm
 
+parser.add_argument('--seed', default=2026, type=int)                    # 随机种子
+
 parser.add_argument('--time_range', default=25, type=int)    # 时间分桶桶数
 parser.add_argument('--time_func', default='log', type=str)  # 时间映射函数
 parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
@@ -35,6 +47,15 @@ parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
 parser.add_argument('--use_normalized_gap', default=True, type=str2bool)        # 是否使用归一化时间间隔
 parser.add_argument('--use_recent_compactness', default=True, type=str2bool)    # 是否使用最近紧凑度
 parser.add_argument('--use_recency_score', default=True, type=str2bool)         # 是否使用新近性分数
+
+# 分支独立开关：默认none表示继承全局开关，便于向后兼容
+parser.add_argument('--long_use_normalized_gap', default=None, type=str2tristate)      # 长分支是否使用归一化时间间隔
+parser.add_argument('--long_use_recent_compactness', default=None, type=str2tristate)  # 长分支是否使用最近紧凑度
+parser.add_argument('--long_use_recency_score', default=None, type=str2tristate)       # 长分支是否使用新近性分数
+
+parser.add_argument('--cnn_use_normalized_gap', default=None, type=str2tristate)       # CNN分支是否使用归一化时间间隔
+parser.add_argument('--cnn_use_recent_compactness', default=None, type=str2tristate)   # CNN分支是否使用最近紧凑度
+parser.add_argument('--cnn_use_recency_score', default=None, type=str2tristate)        # CNN分支是否使用新近性分数
 
 parser.add_argument('--use_cnn', default=True, type=str2bool)                   # 是否使用短期CNN分支
 parser.add_argument('--short_num_blocks', default=2, type=int)    # 短期CNN层数
@@ -50,6 +71,18 @@ with open(os.path.join(args.dataset + '_' + args.train_dir, 'args.txt'), 'w') as
 f.close()
 
 if __name__ == '__main__':
+    # 固定随机种子，保证多次重复实验可复现
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if args.device.startswith('cuda') and torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+    try:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except Exception:
+        pass
+
     # 构建索引
     u2i_index, i2u_index = build_index(args.dataset)
     
@@ -69,7 +102,7 @@ if __name__ == '__main__':
     
     # 日志
     f = open(os.path.join(args.dataset + '_' + args.train_dir, 'log.txt'), 'w')
-    f.write('epoch (val_ndcg, val_hr) (test_ndcg, test_hr)\n')
+    f.write('epoch,loss,val_ndcg,val_hr,test_ndcg,test_hr\n')
     
     # 初始化采样器和模型
     sampler = WarpSampler(user_train, usernum, itemnum, batch_size=args.batch_size, maxlen=args.maxlen, n_workers=3)
@@ -115,6 +148,8 @@ if __name__ == '__main__':
         model.eval()
         t_test = evaluate(model, dataset, args)
         print('test (NDCG@10: %.4f, HR@10: %.4f)' % (t_test[0], t_test[1]))
+        f.write('inference_only,NA,NA,NA,%.6f,%.6f\n' % (t_test[0], t_test[1]))
+        f.flush()
     
     # 定义损失函数和优化器
     # ce_criterion = torch.nn.CrossEntropyLoss()
@@ -176,6 +211,7 @@ if __name__ == '__main__':
             # print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
 
         print("loss in epoch {}: {}".format(epoch, epoch_loss / num_batch))
+        avg_epoch_loss = epoch_loss / num_batch
 
         # 验证集评估
         if epoch % 10 == 0:
@@ -203,7 +239,7 @@ if __name__ == '__main__':
             else:
                 patience_cnt += 1
 
-            f.write(str(epoch) + ' ' + str(t_valid) + ' ' + str(t_test) + '\n')
+            f.write('%d,%.6f,%.6f,%.6f,%.6f,%.6f\n' % (epoch, avg_epoch_loss, t_valid[0], t_valid[1], t_test[0], t_test[1]))
             f.flush()
 
             # 早停
