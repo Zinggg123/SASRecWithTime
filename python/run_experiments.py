@@ -307,14 +307,14 @@ def main():
     parser.add_argument('--resume', type=lambda s: s.lower() == 'true', default=True)
     parser.add_argument('--output_csv', default='experiment_master.csv')
 
-    parser.add_argument('--time_ranges', nargs='+', type=int, default=[10, 25, 50])
-    parser.add_argument('--time_scales', nargs='+', type=float, default=[0.5, 1.0, 2.0])
+    parser.add_argument('--time_ranges', nargs='+', type=int, default=[25, 40, 60])
+    parser.add_argument('--time_scales', nargs='+', type=float, default=[1.0, 2.0, 3.0, 4.0])
 
     parser.add_argument('--short_num_blocks', nargs='+', type=int, default=[1, 2])
-    parser.add_argument('--short_kernel_sizes', nargs='+', type=int, default=[3, 5])
-    parser.add_argument('--recent_windows', nargs='+', type=int, default=[5, 7])
+    parser.add_argument('--short_kernel_sizes', nargs='+', type=int, default=[2, 3])
+    parser.add_argument('--recent_windows', nargs='+', type=int, default=[3, 5])
 
-    parser.add_argument('--gate_hidden_units', nargs='+', type=int, default=[64, 128])
+    parser.add_argument('--gate_hidden_units', nargs='+', type=int, default=[32, 64])
 
     args = parser.parse_args()
     if args.max_parallel < 1:
