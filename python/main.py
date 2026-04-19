@@ -12,7 +12,7 @@ def str2bool(s):
     return s == 'true'
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--dataset', required=True)             #数据集名称
+parser.add_argument('--dataset', required=True)             # 数据集名称
 parser.add_argument('--train_dir', required=True)           # 训练结果保存目录
 parser.add_argument('--batch_size', default=128, type=int)  # 批次大小
 parser.add_argument('--lr', default=0.001, type=float)      # 学习率
@@ -27,6 +27,9 @@ parser.add_argument('--device', default='cuda', type=str)   # 设备
 parser.add_argument('--inference_only', default=False, type=str2bool) # 是否只进行推理
 parser.add_argument('--state_dict_path', default=None, type=str)      # 预训练模型路径
 parser.add_argument('--norm_first', action='store_true', default=False) # 是否Pre-norm
+parser.add_argument('--time_range', default=25, type=int)    # 时间分桶桶数
+parser.add_argument('--time_func', default='log', type=str)  # 时间映射函数
+parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
 
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
@@ -68,9 +71,10 @@ if __name__ == '__main__':
         except:
             pass # just ignore those failed init layers
 
-    # 初始化位置嵌入和物品嵌入
+    # 初始化位置嵌入和物品嵌入的0位置
     model.pos_emb.weight.data[0, :] = 0
     model.item_emb.weight.data[0, :] = 0
+    model.time_emb.weight.data[0, :] = 0
 
     # this fails embedding init 'Embedding' object has no attribute 'dim'
     # model.apply(torch.nn.init.xavier_uniform_)
@@ -104,7 +108,7 @@ if __name__ == '__main__':
     adam_optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, betas=(0.9, 0.98))
 
     best_val_ndcg, best_val_hr = 0.0, 0.0
-    best_test_ndcg, best_test_hr = 0.0, 0.0
+    # best_test_ndcg, best_test_hr = 0.0, 0.0
     T = 0.0
     t0 = time.time()
 
@@ -122,8 +126,11 @@ if __name__ == '__main__':
             u, seq, pos, neg = sampler.next_batch() # tuples to ndarray
             u, seq, pos, neg = np.array(u), np.array(seq), np.array(pos), np.array(neg)
             
+            log_seqs = seq[:, 0, :]
+            time_seqs = seq[:, 1, :]
+
             # 模型前向传播
-            pos_logits, neg_logits = model(u, seq, pos, neg) # 使用forward方法
+            pos_logits, neg_logits = model(u, log_seqs, time_seqs, pos, neg) # 使用forward方法
 
             # 创建标签
             pos_labels, neg_labels = torch.ones(pos_logits.shape, device=args.device), torch.zeros(neg_logits.shape, device=args.device)
@@ -138,7 +145,8 @@ if __name__ == '__main__':
             # L2正则化防过拟合
             # torch.norm(param) returns the square root of the sum of squared weights (‖w‖₂), 
             # should be torch.norm(param)**2 or the way below which is faster.
-            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)    
+            for param in model.item_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2) 
+            for param in model.time_emb.parameters(): loss += args.l2_emb * torch.sum(param ** 2)   
             
             # 反向传播
             loss.backward()
@@ -161,11 +169,11 @@ if __name__ == '__main__':
                     % (epoch, T, t_valid[0], t_valid[1], t_test[0], t_test[1]))
 
             # 保存最佳
-            if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr or t_test[0] > best_test_ndcg or t_test[1] > best_test_hr:
+            if t_valid[0] > best_val_ndcg or t_valid[1] > best_val_hr:
                 best_val_ndcg = max(t_valid[0], best_val_ndcg)
                 best_val_hr = max(t_valid[1], best_val_hr)
-                best_test_ndcg = max(t_test[0], best_test_ndcg)
-                best_test_hr = max(t_test[1], best_test_hr)
+                # best_test_ndcg = max(t_test[0], best_test_ndcg)
+                # best_test_hr = max(t_test[1], best_test_hr)
                 folder = args.dataset + '_' + args.train_dir
                 fname = 'SASRec.epoch={}.lr={}.layer={}.head={}.hidden={}.maxlen={}.pth'
                 fname = fname.format(epoch, args.lr, args.num_blocks, args.num_heads, args.hidden_units, args.maxlen)
