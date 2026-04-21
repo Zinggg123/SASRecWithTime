@@ -176,14 +176,17 @@ class SASRec(torch.nn.Module):
         window = max(1, min(self.recent_window, time_values.size(1)))
         kernel = torch.ones((1, 1, window), device=time_values.device, dtype=time_values.dtype)
 
-        summed_values = F.conv1d((time_values * valid_mask).unsqueeze(1), kernel, padding=window - 1)
+        # Use log1p-scaled gap to avoid compactness collapsing toward 0 on large raw intervals.
+        safe_time_values = torch.clamp(time_values, min=0.0)
+        log_gap_values = torch.log1p(safe_time_values)
+        summed_values = F.conv1d((log_gap_values * valid_mask).unsqueeze(1), kernel, padding=window - 1)
         summed_mask = F.conv1d(valid_mask.unsqueeze(1), kernel, padding=window - 1)
 
         summed_values = summed_values.squeeze(1)[:, :time_values.size(1)]
         summed_mask = summed_mask.squeeze(1)[:, :time_values.size(1)]
 
-        mean_gap = summed_values / (summed_mask + 1e-8)
-        compactness = torch.exp(-mean_gap)
+        mean_log_gap = summed_values / (summed_mask + 1e-8)
+        compactness = torch.exp(-mean_log_gap)
         return compactness * valid_mask
 
     def _build_time_features(self, log_seqs, time_seqs):

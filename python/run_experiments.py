@@ -402,6 +402,8 @@ def select_best_config(aggregate_rows_list, stage):
         key=lambda r: (
             r['best_val_ndcg_mean'],
             r['best_val_hr_mean'],
+            -(r.get('best_val_ndcg_std') if r.get('best_val_ndcg_std') is not None else float('inf')),
+            -(r.get('best_val_hr_std') if r.get('best_val_hr_std') is not None else float('inf')),
         ),
     )
 
