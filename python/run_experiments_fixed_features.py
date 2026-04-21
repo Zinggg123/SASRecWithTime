@@ -66,7 +66,8 @@ def parse_b1a_config_spec(spec):
 
 
 def build_command(dataset, train_dir, seed, config):
-    cmd = [sys.executable, 'main.py', f'--dataset={dataset}', f'--train_dir={train_dir}', f'--seed={seed}']
+    # Use unbuffered mode so training stdout is flushed to runner_stdout.log promptly.
+    cmd = [sys.executable, '-u', 'main.py', f'--dataset={dataset}', f'--train_dir={train_dir}', f'--seed={seed}']
     for key, value in config.items():
         if key.endswith('_subset_label'):
             continue
@@ -327,8 +328,10 @@ def run_spec(python_dir, dataset, seed_index, seed, stage, cfg_name, config, res
     last_exc = None
     for attempt in range(io_retries + 1):
         try:
+            child_env = os.environ.copy()
+            child_env['PYTHONUNBUFFERED'] = '1'
             with open(stdout_path, 'w', encoding='utf-8') as out, open(stderr_path, 'w', encoding='utf-8') as err:
-                proc = subprocess.run(cmd, cwd=python_dir, stdout=out, stderr=err)
+                proc = subprocess.run(cmd, cwd=python_dir, stdout=out, stderr=err, env=child_env)
             break
         except OSError as exc:
             last_exc = exc

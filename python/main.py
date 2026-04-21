@@ -62,6 +62,7 @@ parser.add_argument('--short_num_blocks', default=2, type=int)    # 短期CNN层
 parser.add_argument('--short_kernel_size', default=3, type=int)   # 短期卷积核大小
 parser.add_argument('--recent_window', default=5, type=int)       # 最近交互紧凑度窗口
 parser.add_argument('--gate_hidden_units', default=64, type=int)  # 门控MLP隐藏层大小
+parser.add_argument('--heartbeat_steps', default=200, type=int)    # 每隔多少个step输出一次训练心跳
 
 args = parser.parse_args()
 if not os.path.isdir(args.dataset + '_' + args.train_dir):
@@ -209,6 +210,19 @@ if __name__ == '__main__':
 
             epoch_loss += loss.item()
             # print("loss in epoch {} iteration {}: {}".format(epoch, step, loss.item())) # expected 0.4~0.6 after init few epochs
+
+            # 训练心跳：在长epoch内周期性输出进度，便于实时观察任务仍在运行。
+            if args.heartbeat_steps > 0 and ((step + 1) % args.heartbeat_steps == 0):
+                avg_loss_so_far = epoch_loss / (step + 1)
+                print(
+                    'heartbeat epoch:%d step:%d/%d avg_loss:%.6f' % (
+                        epoch,
+                        step + 1,
+                        num_batch,
+                        avg_loss_so_far,
+                    ),
+                    flush=True,
+                )
 
         print("loss in epoch {}: {}".format(epoch, epoch_loss / num_batch))
         avg_epoch_loss = epoch_loss / num_batch
