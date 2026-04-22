@@ -43,6 +43,7 @@ parser.add_argument('--seed', default=2026, type=int)                    # 随�
 parser.add_argument('--time_range', default=25, type=int)    # 时间分桶桶数
 parser.add_argument('--time_func', default='log', type=str)  # 时间映射函数
 parser.add_argument('--time_scale', default=1.0, type=float) # 缩放因子
+parser.add_argument('--use_discrete_time', default=True, type=str2bool)         # 是否使用离散时间桶
 
 parser.add_argument('--use_normalized_gap', default=True, type=str2bool)        # 是否使用归一化时间间隔
 parser.add_argument('--use_recent_compactness', default=True, type=str2bool)    # 是否使用最近紧凑度
@@ -52,10 +53,12 @@ parser.add_argument('--use_recency_score', default=True, type=str2bool)         
 parser.add_argument('--long_use_normalized_gap', default=None, type=str2tristate)      # 长分支是否使用归一化时间间隔
 parser.add_argument('--long_use_recent_compactness', default=None, type=str2tristate)  # 长分支是否使用最近紧凑度
 parser.add_argument('--long_use_recency_score', default=None, type=str2tristate)       # 长分支是否使用新近性分数
+parser.add_argument('--long_use_discrete_time', default=None, type=str2tristate)       # 长分支是否使用离散时间桶
 
 parser.add_argument('--cnn_use_normalized_gap', default=None, type=str2tristate)       # CNN分支是否使用归一化时间间隔
 parser.add_argument('--cnn_use_recent_compactness', default=None, type=str2tristate)   # CNN分支是否使用最近紧凑度
 parser.add_argument('--cnn_use_recency_score', default=None, type=str2tristate)        # CNN分支是否使用新近性分数
+parser.add_argument('--cnn_use_discrete_time', default=None, type=str2tristate)        # CNN分支是否使用离散时间桶
 
 parser.add_argument('--use_cnn', default=True, type=str2bool)                   # 是否使用短期CNN分支
 parser.add_argument('--short_num_blocks', default=2, type=int)    # 短期CNN层数

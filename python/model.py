@@ -82,6 +82,7 @@ class SASRec(torch.nn.Module):
         self.gate_hidden_units = getattr(args, 'gate_hidden_units', args.hidden_units)
 
         self.use_cnn = getattr(args, 'use_cnn', True)
+        self.use_discrete_time = getattr(args, 'use_discrete_time', True)
         self.use_normalized_gap = getattr(args, 'use_normalized_gap', True)
         self.use_recent_compactness = getattr(args, 'use_recent_compactness', True)
         self.use_recency_score = getattr(args, 'use_recency_score', True)
@@ -89,9 +90,11 @@ class SASRec(torch.nn.Module):
         self.long_use_normalized_gap = getattr(args, 'long_use_normalized_gap', None)
         self.long_use_recent_compactness = getattr(args, 'long_use_recent_compactness', None)
         self.long_use_recency_score = getattr(args, 'long_use_recency_score', None)
+        self.long_use_discrete_time = getattr(args, 'long_use_discrete_time', None)
         self.cnn_use_normalized_gap = getattr(args, 'cnn_use_normalized_gap', None)
         self.cnn_use_recent_compactness = getattr(args, 'cnn_use_recent_compactness', None)
         self.cnn_use_recency_score = getattr(args, 'cnn_use_recency_score', None)
+        self.cnn_use_discrete_time = getattr(args, 'cnn_use_discrete_time', None)
 
         # backward compatibility: if branch-specific switches are not set, inherit from global switches
         if self.long_use_normalized_gap is None:
@@ -100,12 +103,16 @@ class SASRec(torch.nn.Module):
             self.long_use_recent_compactness = self.use_recent_compactness
         if self.long_use_recency_score is None:
             self.long_use_recency_score = self.use_recency_score
+        if self.long_use_discrete_time is None:
+            self.long_use_discrete_time = self.use_discrete_time
         if self.cnn_use_normalized_gap is None:
             self.cnn_use_normalized_gap = self.use_normalized_gap
         if self.cnn_use_recent_compactness is None:
             self.cnn_use_recent_compactness = self.use_recent_compactness
         if self.cnn_use_recency_score is None:
             self.cnn_use_recency_score = self.use_recency_score
+        if self.cnn_use_discrete_time is None:
+            self.cnn_use_discrete_time = self.use_discrete_time
         self.time_norm = math.log1p(max(self.time_num, 1))
 
         # TODO: loss += args.l2_emb for regularizing embedding vectors during training
@@ -197,37 +204,81 @@ class SASRec(torch.nn.Module):
         time_tensor = torch.LongTensor(time_seqs).to(self.dev).float()
         valid_mask = (log_tensor != 0).float()
 
-        if self.time_func == 'log':
-            time_bucket = self.time_scale * torch.log1p(time_tensor)
+        need_long_discrete = self.long_use_discrete_time
+        need_cnn_discrete = self.cnn_use_discrete_time
+        need_any_discrete = need_long_discrete or need_cnn_discrete
+
+        need_long_continuous = self.long_use_normalized_gap or self.long_use_recent_compactness or self.long_use_recency_score
+        need_cnn_continuous = self.cnn_use_normalized_gap or self.cnn_use_recent_compactness or self.cnn_use_recency_score
+        need_any_continuous = need_long_continuous or need_cnn_continuous
+
+        need_normalized_gap = (
+            self.long_use_normalized_gap
+            or self.cnn_use_normalized_gap
+            or self.long_use_recency_score
+            or self.cnn_use_recency_score
+        )
+        need_recent_compactness = self.long_use_recent_compactness or self.cnn_use_recent_compactness
+
+        zero_context = self.item_emb.weight.new_zeros(
+            log_tensor.size(0),
+            log_tensor.size(1),
+            self.item_emb.embedding_dim,
+        )
+
+        long_discrete_time_emb = zero_context
+        cnn_discrete_time_emb = zero_context
+        if need_any_discrete:
+            if self.time_func == 'log':
+                time_bucket = self.time_scale * torch.log1p(time_tensor)
+            else:
+                time_bucket = self.time_num * (1 - torch.exp(-time_tensor * self.time_scale))
+
+            time_bucket = time_bucket.long().clamp(1, self.time_num)
+            time_bucket = time_bucket * valid_mask.long()
+            time_bucket_emb = self.time_emb(time_bucket) # 离散时间桶
+
+            if need_long_discrete:
+                long_discrete_time_emb = time_bucket_emb
+            if need_cnn_discrete:
+                cnn_discrete_time_emb = time_bucket_emb
+
+        if need_normalized_gap:
+            normalized_gap = torch.log1p(time_tensor) / self.time_norm # 归一至可控范围，避免数值过大导致训练不稳定
+            normalized_gap = normalized_gap * valid_mask # 连续时间间隔
         else:
-            time_bucket = self.time_num * (1 - torch.exp(-time_tensor * self.time_scale))
+            normalized_gap = torch.zeros_like(time_tensor)
 
-        time_bucket = time_bucket.long().clamp(1, self.time_num)
-        time_bucket = time_bucket * valid_mask.long()
-        time_bucket_emb = self.time_emb(time_bucket) # 离散时间桶
+        if need_recent_compactness:
+            recent_compactness = self._recent_compactness(time_tensor, valid_mask)
+        else:
+            recent_compactness = torch.zeros_like(time_tensor)
 
-        normalized_gap = torch.log1p(time_tensor) / self.time_norm # 归一至可控范围，避免数值过大导致训练不稳定
-        normalized_gap = normalized_gap * valid_mask # 连续时间间隔
+        if self.long_use_recency_score or self.cnn_use_recency_score:
+            recency_score = torch.exp(-normalized_gap) * valid_mask # 当前间隔的新近性分数
+        else:
+            recency_score = torch.zeros_like(time_tensor)
 
-        recent_compactness = self._recent_compactness(time_tensor, valid_mask)
-        recency_score = torch.exp(-normalized_gap) * valid_mask # 当前间隔的新近性分数
+        if need_long_continuous:
+            long_normalized_gap_feature = normalized_gap if self.long_use_normalized_gap else torch.zeros_like(normalized_gap)
+            long_recent_compactness_feature = recent_compactness if self.long_use_recent_compactness else torch.zeros_like(recent_compactness)
+            long_recency_score_feature = recency_score if self.long_use_recency_score else torch.zeros_like(recency_score)
+            long_continuous_time = torch.stack([long_normalized_gap_feature, long_recent_compactness_feature, long_recency_score_feature], dim=-1)
+            long_time_continuous_emb = self.time_cont_proj(long_continuous_time) # 线性层学习组合方式
+        else:
+            long_time_continuous_emb = zero_context
 
-        long_normalized_gap_feature = normalized_gap if self.long_use_normalized_gap else torch.zeros_like(normalized_gap)
-        long_recent_compactness_feature = recent_compactness if self.long_use_recent_compactness else torch.zeros_like(recent_compactness)
-        long_recency_score_feature = recency_score if self.long_use_recency_score else torch.zeros_like(recency_score)
+        if need_cnn_continuous:
+            cnn_normalized_gap_feature = normalized_gap if self.cnn_use_normalized_gap else torch.zeros_like(normalized_gap)
+            cnn_recent_compactness_feature = recent_compactness if self.cnn_use_recent_compactness else torch.zeros_like(recent_compactness)
+            cnn_recency_score_feature = recency_score if self.cnn_use_recency_score else torch.zeros_like(recency_score)
+            cnn_continuous_time = torch.stack([cnn_normalized_gap_feature, cnn_recent_compactness_feature, cnn_recency_score_feature], dim=-1)
+            cnn_time_continuous_emb = self.time_cont_proj(cnn_continuous_time)
+        else:
+            cnn_time_continuous_emb = zero_context
 
-        cnn_normalized_gap_feature = normalized_gap if self.cnn_use_normalized_gap else torch.zeros_like(normalized_gap)
-        cnn_recent_compactness_feature = recent_compactness if self.cnn_use_recent_compactness else torch.zeros_like(recent_compactness)
-        cnn_recency_score_feature = recency_score if self.cnn_use_recency_score else torch.zeros_like(recency_score)
-
-        long_continuous_time = torch.stack([long_normalized_gap_feature, long_recent_compactness_feature, long_recency_score_feature], dim=-1)
-        long_time_continuous_emb = self.time_cont_proj(long_continuous_time) # 线性层学习组合方式
-
-        cnn_continuous_time = torch.stack([cnn_normalized_gap_feature, cnn_recent_compactness_feature, cnn_recency_score_feature], dim=-1)
-        cnn_time_continuous_emb = self.time_cont_proj(cnn_continuous_time)
-
-        long_time_context = time_bucket_emb + long_time_continuous_emb
-        cnn_time_context = time_bucket_emb + cnn_time_continuous_emb
+        long_time_context = long_discrete_time_emb + long_time_continuous_emb
+        cnn_time_context = cnn_discrete_time_emb + cnn_time_continuous_emb
         recent_compactness_gate = recent_compactness.unsqueeze(-1) if self.cnn_use_recent_compactness else torch.zeros_like(recent_compactness.unsqueeze(-1))
         recency_score_gate = recency_score.unsqueeze(-1) if self.cnn_use_recency_score else torch.zeros_like(recency_score.unsqueeze(-1))
         
